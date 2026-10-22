@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monitor de Aula - Tiempo Real (Perú)</title>
+  <!-- MQTT.js y Chart.js desde CDN -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background-color: #0f172a;
+      color: #f8fafc;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 100vh;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 25px;
+    }
+    h1 { font-size: 1.8rem; color: #f8fafc; margin-bottom: 5px; }
+    .subtitle { color: #94a3b8; font-size: 0.95rem; }
+    .container {
+      width: 100%;
+      max-width: 850px;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+    }
+    .card {
+      background-color: #1e293b;
+      padding: 25px;
+      border-radius: 16px;
+      border: 1px solid #334155;
+      text-align: center;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .full-width { grid-column: 1 / -1; }
+    h2 { font-size: 0.9rem; color: #94a3b8; margin-bottom: 12px; letter-spacing: 1px; }
+    .val-big {
+      font-size: 2.8rem;
+      font-weight: 800;
+      color: #38bdf8;
+      transition: color 0.3s ease;
+    }
+    .time-val { font-size: 1.2rem; color: #f59e0b; font-weight: 600; }
+    .chart-box { height: 280px; position: relative; margin-top: 10px; }
+    .status-badge {
+      display: inline-block;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      background-color: #334155;
+      margin-top: 10px;
+    }
+    .connected { background-color: #065f46; color: #34d399; }
+    .disconnected { background-color: #7f1d1d; color: #f87171; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Sistema de Monitoreo de Sonido en Aula</h1>
+    <p class="subtitle">Clasificación en tiempo real vía MQTT - ESP32 Físico</p>
+    <div id="conexion" class="status-badge disconnected">Esperando ESP32...</div>
+  </header>
+
+  <div class="container">
+    <div class="card">
+      <h2>ESTADO CLASIFICADO</h2>
+      <div id="estado" class="val-big">--</div>
+    </div>
+    
+    <div class="card">
+      <h2>NIVEL RMS (VOLUMEN)</h2>
+      <div id="rms" class="val-big">0.0</div>
+    </div>
+
+    <div class="card full-width">
+      <h2>FECHA Y HORA OFICIAL (PERÚ)</h2>
+      <div id="hora" class="time-val">Esperando sincronización...</div>
+    </div>
+
+    <div class="card full-width">
+      <h2>HISTORIAL DE SONIDO EN TIEMPO REAL</h2>
+      <div class="chart-box">
+        <canvas id="soundChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Inicialización del gráfico Chart.js
+    const ctx = document.getElementById('soundChart').getContext('2d');
+    const soundChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: [],
+        datasets: [{
+          label: 'Nivel RMS',
+          data: [],
+          borderColor: '#38bdf8',
+          backgroundColor: 'rgba(56, 189, 248, 0.15)',
+          fill: true,
+          borderWidth: 3,
+          pointRadius: 4,
+          pointBackgroundColor: '#38bdf8',
+          tension: 0.2
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false, // Desactiva animaciones pesadas para fluidez segundo a segundo
+        scales: {
+          x: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+          y: { beginAtZero: true, ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+        },
+        plugins: { legend: { labels: { color: '#f8fafc' } } }
+      }
+    });
+
+    // Conexión WebSocket a HiveMQ
+    const client = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
+      keepalive: 10,
+      reconnectPeriod: 1000
+    });
+    
+    // IMPORTANTE: Este canal coincide exactamente con el del ESP32
+    const topic = "mi_proyecto_clase_sonido_2026";
+
+    const estadoEl = document.getElementById('estado');
+    const rmsEl = document.getElementById('rms');
+    const horaEl = document.getElementById('hora');
+    const conexionEl = document.getElementById('conexion');
+
+    client.on('connect', () => {
+      conexionEl.innerText = "● Conectado a la Red";
+      conexionEl.className = "status-badge connected";
+      client.subscribe(topic);
+    });
+
+    client.on('offline', () => {
+      conexionEl.innerText = "Desconectado";
+      conexionEl.className = "status-badge disconnected";
+    });
+
+    client.on('message', (top, message) => {
+      try {
+        // Lee el paquete JSON enviado desde MicroPython
+        const data = JSON.parse(message.toString());
+        
+        // Actualiza los textos
+        estadoEl.innerText = data.estado;
+        rmsEl.innerText = data.rms;
+        horaEl.innerText = data.hora;
+
+        // Cambia el color del estado según el nivel
+        if (data.estado === "BULLA") {
+          estadoEl.style.color = "#f87171"; // Rojo
+        } else if (data.estado === "CONVERSA" || data.estado === "conversacion") {
+          estadoEl.style.color = "#f59e0b"; // Amarillo
+        } else {
+          estadoEl.style.color = "#34d399"; // Verde (Silencio)
+        }
+
+        // Extrae la hora corta (HH:MM:SS) para el eje X
+        const horaCorta = data.hora.includes(' ') ? data.hora.split(' ')[1] : data.hora;
+
+        // Mantiene solo las últimas 15 mediciones en el gráfico
+        if (soundChart.data.labels.length >= 15) {
+          soundChart.data.labels.shift();
+          soundChart.data.datasets[0].data.shift();
+        }
+        
+        soundChart.data.labels.push(horaCorta);
+        soundChart.data.datasets[0].data.push(data.rms);
+        soundChart.update();
+
+      } catch (e) {
+        console.error("Error al procesar el mensaje JSON:", e);
+      }
+    });
+  </script>
+
+</body>
+</html>
